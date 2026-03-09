@@ -3,32 +3,54 @@ from groq import Groq
 import gspread
 from google.oauth2.service_account import Credentials
 import json
+import pandas as pd
 from datetime import datetime
 
-# --- SETUP ---
-SHEET_NAME = "My_AI_Tracker" 
+# --- CONFIGURATION ---
+SHEET_NAME = "My_AI_Tracker"  # <-- CHANGE TO YOUR SHEET NAME
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 GOOGLE_JSON = st.secrets["GOOGLE_SERVICE_ACCOUNT"]
 
 # Initialize Groq
 client = Groq(api_key=GROQ_API_KEY)
 
-# Initialize Google Sheets with modern google-auth
+# Initialize Google Sheets (Cached for speed)
 @st.cache_resource
-def get_gspread_client():
+def get_gs_client():
     scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     service_account_info = json.loads(GOOGLE_JSON)
     creds = Credentials.from_service_account_info(service_account_info, scopes=scope)
     return gspread.authorize(creds)
 
 try:
-    gs_client = get_gspread_client()
+    gs_client = get_gs_client()
     sheet = gs_client.open(SHEET_NAME)
+    trans_ws = sheet.worksheet("Transactions")
+    loans_ws = sheet.worksheet("Loans")
 except Exception as e:
-    st.error(f"Failed to connect to Google Sheets: {e}")
+    st.error(f"Connection Error: {e}")
     st.stop()
 
+# --- APP UI ---
+st.set_page_config(page_title="AI Finance Tracker", layout="wide")
 st.title("💰 AI Expense & Loan Tracker")
+
+# --- DASHBOARD SECTION ---
+try:
+    df_trans = pd.DataFrame(trans_ws.get_all_records())
+    if not df_trans.empty:
+        income = df_trans[df_trans['Type'] == 'Income']['Amount'].sum()
+        expense = df_trans[df_trans['Type'] == 'Expense']['Amount'].sum()
+        balance = income - expense
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Current Balance", f"₹{balance}")
+        col2.metric("Total Expenses", f"₹{expense}")
+        col3.metric("Total Income", f"₹{income}")
+except:
+    st.info("Start chatting to see your financial summary here!")
+
+st.divider()
 
 # --- CHAT INTERFACE ---
 if "messages" not in st.session_state:
@@ -38,39 +60,47 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ex: Gave 500 to Rahul for lunch"):
+if prompt := st.chat_input("Ex: Spent 500 on dinner or Lent 1000 to Rahul"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # --- AI LOGIC (GROQ) ---
+    # --- AI BRAIN (GROQ) ---
     system_prompt = """
-    You are a financial assistant. Convert user text into a JSON object.
-    Fields: "tab" (either 'Transactions' or 'Loans'), "type" (Income/Expense/Lent/Borrowed), "amount" (number), "person" (name or 'N/A'), "category" (Food/Travel/Salary/etc), "desc" (summary).
-    Example: "Gave 500 to Rahul" -> {"tab": "Loans", "type": "Lent", "amount": 500, "person": "Rahul", "category": "Loan", "desc": "Lent to Rahul"}
+    You are a financial assistant. You MUST respond ONLY with a valid JSON object.
+    Fields: 
+    - "tab": "Transactions" (for personal money) or "Loans" (for money with friends)
+    - "type": "Income", "Expense", "Lent", "Borrowed", or "Paid"
+    - "amount": number
+    - "person": Name of friend or "N/A"
+    - "category": Food, Travel, Salary, Rent, Loan, etc.
+    - "desc": A short 3-4 word summary.
     """
     
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-            model="llama3-8b-8192",
+        completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.3-70b-versatile",
             response_format={"type": "json_object"}
         )
-        data = json.loads(chat_completion.choices[0].message.content)
         
-        # --- SAVE TO GOOGLE SHEETS ---
-        worksheet = sheet.worksheet(data['tab'])
-        date_today = datetime.now().strftime("%Y-%m-%d")
-        
-        if data['tab'] == "Transactions":
-            worksheet.append_row([date_today, data['type'], data['category'], data['amount'], data['desc']])
+        res = json.loads(completion.choices[0].message.content)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+        # --- SAVE TO GOOGLE SHEET ---
+        if res['tab'] == "Transactions":
+            trans_ws.append_row([date_str, res['type'], res['category'], res['amount'], res['desc']])
         else:
-            worksheet.append_row([date_today, data['person'], data['amount'], data['type']])
+            loans_ws.append_row([date_str, res['person'], res['amount'], res['type']])
             
-        response = f"✅ Logged {data['amount']} as {data['type']}."
+        bot_response = f"✅ Recorded: ₹{res['amount']} as {res['type']} ({res['desc']})"
+        
     except Exception as e:
-        response = f"❌ Error: {e}"
+        bot_response = f"❌ Error: {str(e)}"
 
     with st.chat_message("assistant"):
-        st.markdown(response)
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        st.markdown(bot_response)
+    st.session_state.messages.append({"role": "assistant", "content": bot_response})
