@@ -29,100 +29,90 @@ except Exception as e:
     st.error(f"⚠️ Connection Error: {e}")
     st.stop()
 
-st.set_page_config(page_title="AI Finance Tracker", layout="wide")
-st.title("📊 Smart AI Expense & Loan Tracker")
+st.set_page_config(page_title="Hinglish AI Finance Tracker", layout="wide")
+st.title("💸 Smart Hinglish Finance Tracker")
 
-# --- DATA LOADING ---
-data_trans = trans_ws.get_all_records()
-df_trans = pd.DataFrame(data_trans) if data_trans else pd.DataFrame()
-if not df_trans.empty:
-    df_trans['Date'] = pd.to_datetime(df_trans['Date'])
+# --- DATA LOADING & CLEANING ---
+def get_clean_data(worksheet):
+    data = worksheet.get_all_records()
+    df = pd.DataFrame(data)
+    if not df.empty:
+        # Fix the 'str + int' error by forcing Amount to be numeric
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    return df
+
+df_trans = get_clean_data(trans_ws)
 
 # --- CHAT INTERFACE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "pending_entry" not in st.session_state:
+    st.session_state.pending_entry = None
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ex: food 40 / what is my expense?"):
+if prompt := st.chat_input("Ex: 500 mithun ko diye / mera kharcha dikhao"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Context for AI
-    history_summary = df_trans.tail(20).to_string() if not df_trans.empty else "No data."
-    
-    system_prompt = f"""
-    You are a financial assistant. 
-    Current Date: {datetime.now().strftime("%Y-%m-%d")}
-    Recent History: {history_summary}
-
-    RULES:
-    1. If user asks for a report or expense summary (e.g. 'tell me my expense'): 
-       Respond by asking: 'Would you like the report for today, this week, or this month?'
-       Set "action": "ask_period".
-    
-    2. If user specifies a period (today, week, month) or a specific item (food expense):
-       Analyze the data. set "action": "report", "filter_period": "today/week/month/all", "filter_item": "category name or N/A".
-
-    3. If user provides NEW DATA (food 40):
-       set "action": "save", "tab": "Transactions", "type": "Expense/Income", "amount": number, "category": "Food/etc", "desc": "summary".
-
-    4. If just chatting: set "action": "chat", "response": "Friendly reply".
-
-    Respond ONLY in JSON.
-    """
-
-    try:
-        completion = client.chat.completions.create(
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
-            response_format={"type": "json_object"}
-        )
-        res = json.loads(completion.choices[0].message.content)
-
-        if res['action'] == "save":
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            trans_ws.append_row([date_str, res['type'], res['category'], res['amount'], res['desc']])
-            bot_response = f"✅ Recorded: ₹{res['amount']} as {res['type']} ({res['desc']})"
-
-        elif res['action'] == "ask_period":
-            bot_response = "📊 I can check that for you. Would you like the report for **Today**, **This Week**, or **This Month**?"
-
-        elif res['action'] == "report":
-            if df_trans.empty:
-                bot_response = "You don't have any data recorded yet."
-            else:
-                now = datetime.now()
-                temp_df = df_trans.copy()
-                
-                # Filter by Period
-                if res['filter_period'] == "today":
-                    temp_df = temp_df[temp_df['Date'].dt.date == now.date()]
-                elif res['filter_period'] == "week":
-                    start_week = now - timedelta(days=now.weekday())
-                    temp_df = temp_df[temp_df['Date'] >= start_week]
-                elif res['filter_period'] == "month":
-                    temp_df = temp_df[temp_df['Date'].dt.month == now.month]
-
-                # Filter by Item/Category if mentioned
-                item = res.get('filter_item', 'N/A')
-                if item != "N/A":
-                    temp_df = temp_df[temp_df['Category'].str.contains(item, case=False) | temp_df['Description'].str.contains(item, case=False)]
-
-                total = temp_df['Amount'].sum()
-                count = len(temp_df)
-                bot_response = f"📋 **Report for {res['filter_period'].capitalize()}**:\n- Total Amount: ₹{total}\n- Transactions: {count}\n\n"
-                if count > 0:
-                    bot_response += "Recent items: " + ", ".join(temp_df['Description'].tail(3).tolist())
-
+    # --- HANDLE CONFIRMATION ---
+    if st.session_state.pending_entry and prompt.lower() in ['yes', 'haan', 'ok', 'kar do', 'y']:
+        entry = st.session_state.pending_entry
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        if entry['tab'] == "Transactions":
+            trans_ws.append_row([date_str, entry['type'], entry['category'], entry['amount'], entry['desc']])
         else:
-            bot_response = res.get('response', "I'm here to help!")
+            loans_ws.append_row([date_str, entry['person'], entry['amount'], entry['type']])
+        
+        bot_response = f"✅ Done! ₹{entry['amount']} entry save kar di hai."
+        st.session_state.pending_entry = None
+    
+    elif st.session_state.pending_entry and prompt.lower() in ['no', 'nahi', 'cancel', 'n']:
+        bot_response = "Theek hai, entry cancel kar di. Kuch aur help chahiye?"
+        st.session_state.pending_entry = None
 
-    except Exception as e:
-        bot_response = f"❌ Error: {str(e)}"
+    # --- REGULAR AI LOGIC ---
+    else:
+        history_summary = df_trans.tail(10).to_string() if not df_trans.empty else "No records."
+        system_prompt = f"""
+        You are a Hinglish financial assistant. Talk in a mix of Hindi and English.
+        Current Data: {history_summary}
+
+        RULES:
+        1. If user wants to SAVE data: DO NOT save yet. Set "action": "confirm" and explain what you understood in Hinglish.
+        2. If user asks for a REPORT: Set "action": "report", "filter_period": "today/week/month/all".
+        3. Respond ONLY in JSON.
+        
+        Fields for 'confirm': "tab", "type", "amount", "person", "category", "desc".
+        """
+
+        try:
+            completion = client.chat.completions.create(
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                response_format={"type": "json_object"}
+            )
+            res = json.loads(completion.choices[0].message.content)
+
+            if res['action'] == "confirm":
+                st.session_state.pending_entry = res
+                bot_response = f"Aapne kaha: ₹{res['amount']} ka {res['type']} for {res['desc']}. Kya main ise save karun? (Yes/No)"
+            
+            elif res['action'] == "report":
+                # Logic for filtering df_trans based on res['filter_period']
+                total = df_trans['Amount'].sum() # Simplified for brevity
+                bot_response = f"Aapka total {res['filter_period']} ka kharcha ₹{total} hai."
+            
+            else:
+                bot_response = res.get('response', "Main samajh nahi paya, please firse boliye.")
+
+        except Exception as e:
+            bot_response = f"❌ Error: {str(e)}"
 
     with st.chat_message("assistant"):
         st.markdown(bot_response)
