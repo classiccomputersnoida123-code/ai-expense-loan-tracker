@@ -1,5 +1,5 @@
 streamlit
 groq
 gspread
-oauth2client
+google-auth
 pandas
